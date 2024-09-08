@@ -42,69 +42,54 @@ class VectorQuantizer(nn.Module):
 
     def init_emb(self, data):
 
-        # centers = kmeans(
-        #     data,
-        #     self.n_e,
-        #     self.kmeans_iters,
-        # )
-        centers, _ = self.constrained_km(data, 256)
+        centers = kmeans(
+            data,
+            self.n_e, #256
+            self.kmeans_iters,
+        ) #centers is s tensor, shape=[256, 32]
+        #centers, _ = self.constrained_km(data, 256)
         self.embedding.weight.data.copy_(centers)
         self.initted = True
-    
-    def constrained_km(self, data, n_clusters=10):
-        from k_means_constrained import KMeansConstrained 
-        x = data.cpu().detach().numpy()
 
-        size_min = min(len(data) // (n_clusters * 2), 50) # 50 for the very first time, 10 the latter
+    #def diversity_loss(self, x_q, indices, indices_cluster, indices_list):
+    #    emb = self.embedding.weight
+    #    temp = 1
 
-        clf = KMeansConstrained(n_clusters=n_clusters, size_min=size_min, size_max=size_min * 4, max_iter=10, n_init=10,
-                                n_jobs=10, verbose=False) # 'size_min * 4' for the very first time, 'n_clusters * 4' for the latter
-        clf.fit(x)
-        t_centers = torch.from_numpy(clf.cluster_centers_)
-        t_labels = torch.from_numpy(clf.labels_).tolist()
-        value_counts = {}
-        return t_centers, t_labels
+    #    pos_list = [indices_list[i] for i in indices_cluster]
+    #    pos_sample = []
+    #    for idx, pos in enumerate(pos_list):
+    #        random_element = random.choice(pos)
 
+    #        while random_element == indices[idx]:
+    #            random_element = random.choice(pos)
+    #        pos_sample.append(random_element)
 
-    def diversity_loss(self, x_q, indices, indices_cluster, indices_list):
-        emb = self.embedding.weight
-        temp = 1
+    #    y_true = torch.tensor(pos_sample, device=x_q.device)
 
-        pos_list = [indices_list[i] for i in indices_cluster]
-        pos_sample = []
-        for idx, pos in enumerate(pos_list):
-            random_element = random.choice(pos)
+    #    # sim = F.cosine_similarity(x_q, emb, dim=-1)
+    #    sim = torch.matmul(x_q, emb.t())
 
-            while random_element == indices[idx]:
-                random_element = random.choice(pos)
-            pos_sample.append(random_element)
+    #    # sampled_ids = torch.multinomial(best_scores, num_samples=1)
+    #    sim_self = torch.zeros_like(sim)
+    #    for idx, row in enumerate(sim_self):
+    #        sim_self[idx, indices[idx]] = 1e12
+    #    sim = sim - sim_self
+    #    sim = sim / temp
+    #    loss = F.cross_entropy(sim, y_true)
 
-        y_true = torch.tensor(pos_sample, device=x_q.device)
+    #    return loss
 
-        # sim = F.cosine_similarity(x_q, emb, dim=-1)
-        sim = torch.matmul(x_q, emb.t())
+    #def diversity_loss_main_entry(self, x, x_q, indices, labels):
 
-        # sampled_ids = torch.multinomial(best_scores, num_samples=1)
-        sim_self = torch.zeros_like(sim)
-        for idx, row in enumerate(sim_self):
-            sim_self[idx, indices[idx]] = 1e12
-        sim = sim - sim_self
-        sim = sim / temp
-        loss = F.cross_entropy(sim, y_true)
+    #    indices_cluster = [labels[idx.item()] for idx in indices]
+    #    target_numbers = list(range(10)) 
+    #    indices_list = {}
+    #    for target_number in target_numbers:
+    #        indices_list[target_number] = [index for index, num in enumerate(labels) if num == target_number]
 
-        return loss
+    #    diversity_loss = self.diversity_loss(x_q, indices, indices_cluster, indices_list)
 
-    def diversity_loss_main_entry(self, x, x_q, indices, labels):
-
-        indices_cluster = [labels[idx.item()] for idx in indices]
-        target_numbers = list(range(10)) 
-        indices_list = {}
-        for target_number in target_numbers:
-            indices_list[target_number] = [index for index, num in enumerate(labels) if num == target_number]
-
-        diversity_loss = self.diversity_loss(x_q, indices, indices_cluster, indices_list)
-
-        return diversity_loss
+    #    return diversity_loss
                     
     
     @staticmethod
@@ -119,18 +104,18 @@ class VectorQuantizer(nn.Module):
         centered_distances = (distances - middle) / amplitude
         return centered_distances
     
-    def vq_init(self, x, use_sk=True):
-        latent = x.view(-1, self.e_dim)
+    def vq_init(self, x, use_sk=True): #x.shape=[12101, 32]即所有样本encoder后的向量
+        latent = x.view(-1, self.e_dim) #e_dim=32
 
         if not self.initted:
             self.init_emb(latent)
 
         _distance_flag = 'distance'    
         
-        if _distance_flag == 'distance':
+        if _distance_flag == 'distance': #latent.shape=[12101,256], self.embedding.weight.shape=[256,32]
             d = torch.sum(latent**2, dim=1, keepdim=True) + \
                 torch.sum(self.embedding.weight**2, dim=1, keepdim=True).t()- \
-                2 * torch.matmul(latent, self.embedding.weight.t())
+                2 * torch.matmul(latent, self.embedding.weight.t()) #d is a tensor, d.shape=[12101,256]
         else:    
         # Calculate Cosine Similarity 
             d = latent@self.embedding.weight.t()
@@ -152,9 +137,9 @@ class VectorQuantizer(nn.Module):
 
         x_q = self.embedding(indices).view(x.shape)
 
-        return x_q
+        return x_q #[12101, 32]
     
-    def forward(self,  x, label, idx, use_sk=True):
+    def forward(self,  x, idx, use_sk=True):
         # Flatten input
         latent = x.view(-1, self.e_dim)
 
@@ -184,26 +169,22 @@ class VectorQuantizer(nn.Module):
         else:
             d = self.center_distance_for_constraint(d)
             d = d.double()
+            Q = sinkhorn_algorithm(d, self.sk_epsilon, self.sk_iters)
 
-            Q = sinkhorn_algorithm(d,self.sk_epsilon,self.sk_iters)
-            # print(Q.sum(0)[:10])
             if torch.isnan(Q).any() or torch.isinf(Q).any():
                 print(f"Sinkhorn Algorithm returns nan/inf values.")
             indices = torch.argmax(Q, dim=-1)
 
         # indices = torch.argmin(d, dim=-1)
 
-        x_q = self.embedding(indices).view(x.shape)
-
-        # Diversity
-        diversity_loss = self.diversity_loss_main_entry(x, x_q, indices, label)
-        # wandb.log({'diversity_loss': diversity_loss})
+        x_q = self.embedding(indices).view(x.shape)   #x_q.shape=[1024,32]
 
         # compute loss for embedding
         commitment_loss = F.mse_loss(x_q.detach(), x)
         codebook_loss = F.mse_loss(x_q, x.detach())
-
-        loss = codebook_loss + self.mu * commitment_loss + self.beta * diversity_loss
+        loss = codebook_loss + self.mu * commitment_loss
+        
+        wandb.log({'codebook_loss': codebook_loss})
 
 
         # preserve gradients

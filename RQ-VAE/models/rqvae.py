@@ -9,7 +9,6 @@ from .layers import MLPLayers
 from .rq import ResidualVectorQuantizer
 
 
-
 class RQVAE(nn.Module):
     def __init__(self,
                  in_dim=768,
@@ -20,15 +19,11 @@ class RQVAE(nn.Module):
                  bn=False,
                  loss_type="mse",
                  quant_loss_weight=1.0,
+                 beta=0.25,
                  kmeans_init=False,
                  kmeans_iters=100,
                  sk_epsilons= None,
                  sk_iters=100,
-                 alpha = 1.0,
-                 beta = 0.001,
-                 n_clusters = 10,
-                 sample_strategy = 'all',
-                 cf_embedding = 0  
         ):
         super(RQVAE, self).__init__()
 
@@ -40,22 +35,18 @@ class RQVAE(nn.Module):
         self.bn = bn
         self.loss_type = loss_type
         self.quant_loss_weight=quant_loss_weight
+        self.beta = beta
         self.kmeans_init = kmeans_init
         self.kmeans_iters = kmeans_iters
         self.sk_epsilons = sk_epsilons
         self.sk_iters = sk_iters
-        self.cf_embedding = cf_embedding
-        self.alpha = alpha
-        self.beta = beta
-        self.n_clusters = n_clusters
-        self.sample_strategy = sample_strategy
-
 
         self.encode_layer_dims = [self.in_dim] + self.layers + [self.e_dim]
         self.encoder = MLPLayers(layers=self.encode_layer_dims,
                                  dropout=self.dropout_prob,bn=self.bn)
 
-        self.rq = ResidualVectorQuantizer(num_emb_list, e_dim, beta=self.beta,
+        self.rq = ResidualVectorQuantizer(num_emb_list, e_dim,
+                                          beta=self.beta,
                                           kmeans_init = self.kmeans_init,
                                           kmeans_iters = self.kmeans_iters,
                                           sk_epsilons=self.sk_epsilons,
@@ -65,31 +56,24 @@ class RQVAE(nn.Module):
         self.decoder = MLPLayers(layers=self.decode_layer_dims,
                                        dropout=self.dropout_prob,bn=self.bn)
 
-    def forward(self, x, labels, use_sk=True):
-        x = self.encoder(x)
-        x_q, rq_loss, indices = self.rq(x,labels, use_sk=use_sk)
+    def forward(self, x, use_sk=True):
+        x = self.encoder(x) #x.shape=[1024, 768], 经过encoder后变为了[2014,32]
+        x_q, rq_loss, indices = self.rq(x,use_sk=use_sk)
         out = self.decoder(x_q)
 
         return out, rq_loss, indices, x_q
     
-    def CF_loss(self, quantized_rep, encoded_rep):
-        batch_size = quantized_rep.size(0)
-        labels = torch.arange(batch_size, dtype=torch.long, device=quantized_rep.device)
-        similarities = torch.matmul(quantized_rep, encoded_rep.transpose(0, 1))
-        cf_loss = F.cross_entropy(similarities, labels)
-        return cf_loss
-    
-    def vq_initialization(self,x, use_sk=True):
+    def vq_initialization(self,x, use_sk=True): #x.shape=[12101, 768]
         self.rq.vq_ini(self.encoder(x))
 
     @torch.no_grad()
-    def get_indices(self, xs, labels, use_sk=False):
+    def get_indices(self, xs, use_sk=False):
         x_e = self.encoder(xs)
-        _, _, indices = self.rq(x_e, labels, use_sk=use_sk)
+        _, _, indices = self.rq(x_e, use_sk=use_sk)
         return indices
 
-    def compute_loss(self, out, quant_loss, emb_idx, dense_out, xs=None):
-
+    def compute_loss(self, out, quant_loss, dense_out, xs=None):
+        # xs是原始数据
         if self.loss_type == 'mse':
             loss_recon = F.mse_loss(out, xs, reduction='mean')
         elif self.loss_type == 'l1':
@@ -97,13 +81,6 @@ class RQVAE(nn.Module):
         else:
             raise ValueError('incompatible loss type')
 
-        rqvae_n_diversity_loss = loss_recon + self.quant_loss_weight * quant_loss
+        loss_total = loss_recon + self.quant_loss_weight * quant_loss
 
-        # CF_Loss
-        cf_embedding_in_batch = self.cf_embedding[emb_idx]
-        cf_embedding_in_batch = torch.from_numpy(cf_embedding_in_batch).to(dense_out.device)
-        cf_loss = self.CF_loss(dense_out, cf_embedding_in_batch)
-
-        total_loss = rqvae_n_diversity_loss + self.alpha * cf_loss
-
-        return total_loss, cf_loss, loss_recon, quant_loss
+        return loss_total, loss_recon, quant_loss
